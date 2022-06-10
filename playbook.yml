@@ -1,0 +1,192 @@
+---
+- name: Setup Arch Desktop
+  hosts: all
+  become: true
+  become_user: root
+  tasks:
+    - name: Create Groups
+      group:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - wheel
+        - docker
+
+    - name: Allow `wheel` Sudo Privileges
+      lineinfile:
+        dest: /etc/sudoers
+        state: present
+        regexp: '# %wheel ALL=\(ALL:ALL\) NOPASSWD: ALL'
+        line: '%wheel ALL=(ALL:ALL) NOPASSWD: ALL'
+        validate: "/usr/bin/visudo -cf %s"
+
+    - name: Create User
+      user:
+        name: "{{ user }}"
+        shell: /bin/zsh
+        groups: wheel,docker
+        append: true
+
+    - name: Configure Faillock
+      lineinfile:
+        dest: /etc/security/faillock.conf
+        state: present
+        regexp: "# deny = 3"
+        line: "deny = 10"
+
+    - name: Check If `paru` is Installed
+      shell: |
+        #!/bin/sh
+        if ! command -v paru >/dev/null; then
+          echo "Not Installed"
+        else
+          echo "Installed"
+        fi
+      register: check_paru_installed
+      changed_when: check_paru_installed.stdout == "Not Installed"
+
+    - set_fact:
+        should_install_paru: "{{ check_paru_installed.stdout == 'Not Installed' }}"
+
+    - name: Update and Upgrade `pacman` Packages
+      pacman:
+        update_cache: true
+        upgrade: true
+      when: should_install_paru
+
+    - name: Install Necessary Packages
+      pacman:
+        name:
+          - base-devel
+          - git
+        state: present
+      when: should_install_paru
+
+    - name: Ensure `/opt/paru-bin` Exists
+      file:
+        path: /opt/paru-bin
+        state: directory
+        owner: "{{ user }}"
+        group: "{{ user }}"
+        recurse: true
+      when: should_install_paru
+
+    - name: Clone `paru-bin` into `/opt`
+      become: true
+      become_user: "{{ user }}"
+      git:
+        repo: https://aur.archlinux.org/paru-bin.git
+        dest: /opt/paru-bin
+      when: should_install_paru
+
+    - name: Install `paru`
+      become: true
+      become_user: "{{ user }}"
+      shell: |
+        #!/bin/sh
+        cd /opt/paru-bin
+        makepkg -si --noconfirm
+      when: should_install_paru
+
+    - name: Check Updates
+      become: true
+      become_user: "{{ user }}"
+      shell: |
+        #!/bin/sh
+        paru -Qu | wc -l
+      register: check_updates
+      changed_when: check_updates.stdout != "0"
+
+    - set_fact:
+        should_update: "{{ check_updates.stdout != '0' }}"
+
+    - name: Update Packages
+      become: true
+      become_user: "{{ user }}"
+      shell: |
+        #!/bin/sh
+        paru -Syu --noconfirm
+      when: should_update
+
+    - name: Check Missing Packages
+      become: true
+      become_user: "{{ user }}"
+      shell: |
+        #!/bin/bash
+        comm -23 <(echo "{{ packages | join(' ') }}" | tr " " "\n" | sort) <(paru -Q | cut -d ' ' -f 1 | sort)
+      register: check_missing_packages
+      changed_when: check_missing_packages.stdout_lines | length != 0
+      vars:
+        packages:
+          - ansible
+          - ark
+          - azuredatastudio-bin
+          - cronie
+          - curl
+          - docker
+          - docker-compose
+          - google-chrome
+          - insomnia-bin
+          - jq
+          - kdeconnect
+          - less
+          - libffi6
+          - libxcrypt-compat
+          - mpv
+          - nodejs
+          - npm
+          - neovim
+          - noto-fonts-cjk
+          - noto-fonts-emoji
+          - nvm
+          - oh-my-zsh-git
+          - rsync
+          - shellcheck
+          - spectacle
+          - stow
+          - sudo
+          - tmux
+          - vi
+          - visual-studio-code-bin
+          - vim
+          - yarn
+
+    - set_fact:
+        missing_packages: "{{ check_missing_packages.stdout_lines }}"
+
+    - name: Install Missing Packages
+      become: true
+      become_user: "{{ user }}"
+      shell: |
+        #!/bin/sh
+        paru -S $(echo "{{ missing_packages | join(' ') }}") --noconfirm
+      when: missing_packages | length != 0
+
+    - name: Enable and Start Daemons
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - docker
+        - cronie
+    
+    - name: Clone and Update `.dotfiles`
+      become: true
+      become_user: "{{ user }}"
+      git:
+        repo: git@github.com:jeemmartins/.dotfiles.git
+        dest: ~/.dotfiles
+      register: clone_dotfiles
+
+    - set_fact:
+        should_install_dotfiles: "{{ clone_dotfiles.changed }}"
+
+    - name: Install `.dotfiles`
+      become: true
+      become_user: "{{ user }}"
+      shell: |
+        #!/bin/sh
+        cd ~/.dotfiles
+        make install
+      when: should_install_dotfiles
